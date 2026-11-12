@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PhotoDraw — watch your photo become an oil painting</title>
+  <meta name="description" content="Turn any photo into a short animation that repaints it in oils, stroke by stroke.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <h1>PhotoDraw</h1>
+    </div>
+    <button id="newPhoto" class="btn ghost" hidden>New photo</button>
+  </header>
+
+  <main>
+    <!-- Start: pick a photo -->
+    <section id="start" class="start">
+      <p class="lede">Watch any photo get painted in oils, stroke by stroke.</p>
+      <label id="drop" class="drop" for="file">
+        <span class="drop-title">Drop a photo here</span>
+        <span class="drop-sub">or click to choose one · you can also paste</span>
+        <input id="file" type="file" accept="image/*">
+      </label>
+      <button id="sample" class="btn link">No photo handy? Try a sample</button>
+      <p id="error" class="error" role="alert" hidden></p>
+      <p class="fine">Your photo stays on your device. Busier photos take more strokes, so their animation runs longer.</p>
+    </section>
+
+    <!-- Studio: the painting -->
+    <section id="studio" class="studio" hidden>
+      <div class="frame">
+        <canvas id="canvas" aria-label="Oil painting animation"></canvas>
+        <div id="busy" class="busy" hidden>
+          <div class="busy-inner">
+            <span id="busyText">Studying the photo…</span>
+            <div class="bar"><div id="busyBar" class="bar-fill"></div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="controls">
+        <button id="play" class="btn icon" aria-label="Pause">
+          <svg id="iconPause" viewBox="0 0 20 20" aria-hidden="true"><rect x="4" y="3" width="4" height="14" rx="1"/><rect x="12" y="3" width="4" height="14" rx="1"/></svg>
+          <svg id="iconPlay" viewBox="0 0 20 20" aria-hidden="true" hidden><path d="M5 3.5v13a.8.8 0 0 0 1.2.7l10.6-6.5a.8.8 0 0 0 0-1.4L6.200 2.8A.8.8 0 0 0 5 3.500z"/></svg>
+        </button>
+        <button id="replay" class="btn icon" aria-label="Replay from the start">
+          <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3a7 7 0 1 1-6.7 5h2.100A5 5 0 1 0 10 5v3L5.500 4.500 10 1z"/></svg>
+        </button>
+        <div class="progress">
+          <div class="progress-head">
+            <span id="stage">Blocking in</span>
+            <span id="clock" class="num">0:00 / 0:00</span>
+          </div>
+          <div class="bar" role="progressbar" aria-label="Painting progress" aria-valuemin="0" aria-valuemax="100" id="progressBar">
+            <div id="progressFill" class="bar-fill"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="meta">
+        <img id="thumb" class="thumb" alt="Original photo">
+        <dl class="stats">
+          <div><dt>Complexity</dt><dd id="statComplexity" class="num">–</dd></div>
+          <div><dt>Brush strokes</dt><dd id="statStrokes" class="num">–</dd></div>
+          <div><dt>Length</dt><dd id="statLength" class="num">–</dd></div>
+        </dl>
+        <div class="actions">
+          <button id="saveVideo" class="btn primary">Save video</button>
+          <button id="saveImage" class="btn">Save painting</button>
+        </div>
+      </div>
+      <p id="note" class="fine" aria-live="polite"></p>
+    </section>
+  </main>
+
+  <script src="js/painter.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
