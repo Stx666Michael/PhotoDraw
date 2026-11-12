@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PhotoDraw — watch your photo become an oil painting</title>
-  <meta name="description" content="Turn any photo into a short animation that repaints it in oils, stroke by stroke.">
+  <title>PhotoDraw — watch your photo get painted</title>
+  <meta name="description" content="Turn any photo into a short animation that redraws it stroke by stroke in oils, watercolor, pencil, charcoal or ink.">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -19,7 +19,7 @@
   <main>
     <!-- Start: pick a photo -->
     <section id="start" class="start">
-      <p class="lede">Watch any photo get painted in oils, stroke by stroke.</p>
+      <p class="lede">Watch any photo get painted, stroke by stroke.</p>
       <label id="drop" class="drop" for="file">
         <span class="drop-title">Drop a photo here</span>
         <span class="drop-sub">or click to choose one · you can also paste</span>
@@ -27,13 +27,13 @@
       </label>
       <button id="sample" class="btn link">No photo handy? Try a sample</button>
       <p id="error" class="error" role="alert" hidden></p>
-      <p class="fine">Your photo stays on your device. Busier photos take more strokes, so their animation runs longer.</p>
+      <p id="startNote" class="fine">Your photo stays on your device. Busier photos take more strokes, so their animation runs longer.</p>
     </section>
 
     <!-- Studio: the painting -->
     <section id="studio" class="studio" hidden>
       <div class="frame">
-        <canvas id="canvas" aria-label="Oil painting animation"></canvas>
+        <canvas id="canvas" aria-label="Painting animation"></canvas>
         <div id="busy" class="busy" hidden>
           <div class="busy-inner">
             <span id="busyText">Studying the photo…</span>
@@ -61,7 +61,7 @@
         </div>
       </div>
 
-      <div class="meta">
+      <div id="meta" class="meta">
         <img id="thumb" class="thumb" alt="Original photo">
         <dl class="stats">
           <div><dt>Complexity</dt><dd id="statComplexity" class="num">–</dd></div>
@@ -76,6 +76,17 @@
       <p id="note" class="fine" aria-live="polite"></p>
     </section>
   </main>
+
+  <div id="options" class="options">
+    <div class="opt">
+      <span class="opt-label" id="lblStyle">Medium</span>
+      <div class="chips" id="styleChips" role="radiogroup" aria-labelledby="lblStyle"></div>
+    </div>
+    <div class="opt">
+      <span class="opt-label" id="lblLen">Length <em>· longer means more strokes and finer detail</em></span>
+      <div class="chips" id="lenChips" role="radiogroup" aria-labelledby="lblLen"></div>
+    </div>
+  </div>
 
   <script src="js/painter.js"></script>
   <script src="js/app.js"></script>
