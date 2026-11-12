@@ -55,10 +55,15 @@
             <span id="stage">Blocking in</span>
             <span id="clock" class="num">0:00 / 0:00</span>
           </div>
-          <div class="bar" role="progressbar" aria-label="Painting progress" aria-valuemin="0" aria-valuemax="100" id="progressBar">
-            <div id="progressFill" class="bar-fill"></div>
-          </div>
+          <input id="scrub" class="scrub" type="range" min="0" max="1000" value="0" step="1" disabled
+                 aria-label="Painting progress. Drag to preview any moment.">
         </div>
+        </div>
+      </div>
+
+      <div class="speed">
+        <span class="opt-label" id="lblSpeed">Speed</span>
+        <div class="chips" id="speedChips" role="radiogroup" aria-labelledby="lblSpeed"></div>
       </div>
 
       <div id="meta" class="meta">
