@@ -18,7 +18,7 @@ Video is always recorded at 1× speed. Photos never leave the device; everything
 
 - **Complexity** – the photo is scored from 0 to 100 using edge density, gradient energy and colour variety, measured at a fixed small size so resolution does not matter. At Standard length the animation runs from 8 seconds (flat, simple photos) to 42 seconds (very busy ones); Short is half of that, Long double and Epic 3.5 times.
 - **Planning** – five layers of brushes (up to seven for Long and Epic), coarse to fine. Each layer compares the canvas so far with the photo and only paints where they still differ, so simple areas keep their broad strokes and detailed areas get many small ones. Strokes follow the edges in the photo rather than crossing them.
-- **Media** – each medium is a stroke renderer plus a paper texture: oil is opaque bristle lines on a canvas weave; watercolor is overlapping translucent washes with darker pooled edges; the pencils, charcoal and ink are bundles of thin hatching lines whose density builds up tone (graphite, charcoal and ink are monochrome).
+- **Media** – each medium is a stroke renderer plus a paper texture: oil is opaque bristle lines on a canvas weave; watercolor is soft-edged translucent washes that keep bleeding outwards for a moment after they are laid, the early wet ones more than the later, drier ones; the pencils and pen & ink shade each patch one line at a time, back and forth, the way a hand hatches; charcoal is bundles of soft hatching lines whose density builds up tone (graphite, charcoal and ink are monochrome).
 
 ## Files
 

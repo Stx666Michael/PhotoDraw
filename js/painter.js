@@ -13,15 +13,18 @@
 
   // kind: how a stroke is drawn.
   //   bristle - opaque bundle of bristle lines (oil)
-  //   wash    - a few translucent, overlapping ribbons (watercolor)
-  //   hatch   - a bundle of thin, evenly spaced lines (pencils, charcoal, ink)
+  //   wash    - a soft-edged, translucent wash that bleeds outwards while it
+  //             is wet (watercolor)
+  //   line    - one drawn line per stroke; tone comes from hatching a patch
+  //             line after line (pencils, ink)
+  //   hatch   - a bundle of thin, evenly spaced lines (charcoal)
   var STYLES = {
     oil:        { name: 'Oil paint',      kind: 'bristle', ground: [232, 223, 204], tex: 'weave', sat: 1.14, fillAll: true },
-    watercolor: { name: 'Watercolor',     kind: 'wash',    ground: [251, 248, 241], tex: 'paper', sat: 1.2, fillAll: true, alpha: [0.10, 0.42], pool: 0.84 },
-    colorpencil:{ name: 'Colored pencil', kind: 'hatch',   ground: [248, 244, 235], tex: 'tooth', sat: 1.1, t0: 14, lw: 1.3, alpha: 0.5, spacing: 3.6, shade: 18, smooth: true, gridMul: 1.1 },
-    graphite:   { name: 'Graphite',       kind: 'hatch',   ground: [246, 243, 236], tex: 'tooth', mono: true, t0: 12, lw: 1.1, alpha: 0.42, spacing: 3.8, shade: 22, smooth: true, gridMul: 1.1 },
+    watercolor: { name: 'Watercolor',     kind: 'wash',    ground: [251, 248, 241], tex: 'paper', sat: 1.2, fillAll: true, alpha: [0.10, 0.42], pool: 0.93, bleed: 0.6, dryTime: 0.9 },
+    colorpencil:{ name: 'Colored pencil', kind: 'line',    ground: [248, 244, 235], tex: 'tooth', sat: 1.1, t0: 14, lw: 1.3, alpha: 0.5, spacing: 3.6, shade: 18, smooth: true, gridMul: 1.1 },
+    graphite:   { name: 'Graphite',       kind: 'line',    ground: [246, 243, 236], tex: 'tooth', mono: true, t0: 12, lw: 1.1, alpha: 0.42, spacing: 3.8, shade: 22, smooth: true, gridMul: 1.1 },
     charcoal:   { name: 'Charcoal',       kind: 'hatch',   ground: [240, 236, 228], tex: 'grain', mono: true, t0: 10, lw: 3.4, alpha: 0.26, spacing: 4.6, shade: 30, smooth: true, gridMul: 1.1 },
-    ink:        { name: 'Pen & ink',      kind: 'hatch',   ground: [251, 249, 243], tex: 'tooth', mono: true, fixed: [22, 28, 50], t0: 22, lw: 1.0, alpha: 0.85, spacing: 4.6, shade: 0, smooth: true, gridMul: 1.2 }
+    ink:        { name: 'Pen & ink',      kind: 'line',  ground: [251, 249, 243], tex: 'tooth', mono: true, fixed: [22, 28, 50], t0: 22, lw: 1.0, alpha: 0.85, spacing: 4.6, shade: 0, smooth: true, gridMul: 1.2 }
   };
   var STYLE_ORDER = ['oil', 'watercolor', 'colorpencil', 'graphite', 'charcoal', 'ink'];
 
@@ -213,34 +216,142 @@
     ctx.globalAlpha = 1;
   }
 
-  // A watercolor stroke: a darker, wide pool of pigment with narrower, lighter
-  // glazes on top. The overlap is what gives washes their depth.
-  function drawWash(ctx, s, u0, u1) {
-    var rnd = mulberry32(s.seed), k, wd, off, m, st = { pool: s.pool };
+  // A single pencil line: light where the point lands and lifts, firmer in
+  // between. Drawing it in several partial calls gives the same result as
+  // drawing it at once.
+  function drawLine(ctx, s, u0, u1) {
+    var rnd = mulberry32(s.seed), last = s.n - 1;
+    var lw = s.lw0 + rnd() * (s.lw1 - s.lw0);
+    var shade = (rnd() - 0.5) * s.shade;
+    var press = 0.75 + rnd() * 0.5;
+    var ta = last * (0.06 + rnd() * 0.14), tb = last * (0.72 + rnd() * 0.2);
+    var z, a, b;
     ctx.lineCap = 'butt';
     ctx.lineJoin = 'round';
-    for (k = 0; k < 3; k++) {
-      off = (rnd() - 0.5) * s.w * 0.2;
-      wd = s.w * (1 - 0.27 * k) * (0.9 + rnd() * 0.2);
-      m = k === 0 ? (st.pool || 0.9) : k === 2 ? 1.05 : 1;
-      ctx.globalAlpha = s.alpha * (k === 0 ? 0.8 : 1);
-      ctx.lineWidth = wd;
-      ctx.strokeStyle = rgb(s.r * m, s.g * m, s.b * m);
-      pathTo(ctx, s, u0, u1, off);
+    ctx.strokeStyle = rgb(s.r + shade, s.g + shade, s.b + shade);
+    for (z = 0; z < 3; z++) {
+      a = z === 0 ? 0 : z === 1 ? ta : tb;
+      b = z === 0 ? ta : z === 1 ? tb : last;
+      if (a < u0) a = u0;
+      if (b > u1) b = u1;
+      if (b <= a) continue;
+      pathTo(ctx, s, a, b, 0);
+      ctx.globalAlpha = Math.min(1, s.alpha * press * (z === 1 ? 1 : 0.5));
+      ctx.lineWidth = lw * (z === 1 ? 1 : 0.72);
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
   }
 
+  // A watercolor wash, drawn from its start up to position u1. Nested
+  // translucent ribbons, widest and faintest first, give it a soft edge, and a
+  // few blooms let the pigment creep out unevenly. While the wash is wet (time
+  // is the playback time) the edge and the blooms keep spreading; with no time
+  // given the wash is drawn fully dried.
+  var WASH_PASSES = 6;
+  function drawWash(ctx, s, u1, time) {
+    var last = s.n - 1;
+    if (u1 > last) u1 = last;
+    if (u1 <= 0) return;
+    var rnd = mulberry32(s.seed), w = s.w, wet = time !== undefined;
+    var g = 1, k, f, off, m, nb, ub, d, r, gb, i, t, x, y, grad;
+    if (wet) {
+      g = (time - s.t0) / (s.t1 - s.t0 + s.dry);
+      g = g < 0 ? 0 : g > 1 ? 1 : g;
+      g = 1 - (1 - g) * (1 - g);
+    }
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    for (k = 0; k < WASH_PASSES; k++) {
+      f = k / (WASH_PASSES - 1); // 0 = outer edge, 1 = core
+      off = (rnd() - 0.5) * w * 0.12;
+      m = s.pool + (1.03 - s.pool) * f; // pigment settles a little darker at the edge
+      ctx.globalAlpha = s.alpha * (0.3 + 0.3 * f);
+      ctx.lineWidth = w * (0.4 + 0.65 * (1 - f)) * (1 + s.bleed * g * (1 - f));
+      ctx.strokeStyle = rgb(s.r * m, s.g * m, s.b * m);
+      pathTo(ctx, s, 0, u1, off);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    if (w < 6) return;
+
+    // Blooms: pigment carried sideways out of the wash by the water.
+    nb = 2 + Math.floor(rnd() * 3);
+    for (k = 0; k < nb; k++) {
+      ub = rnd() * last;
+      d = (rnd() < 0.5 ? -1 : 1) * w * (0.2 + rnd() * 0.45) * (1 + s.bleed);
+      r = w * (0.4 + rnd() * 0.45) * (1 + s.bleed);
+      if (ub > u1) continue;
+      gb = 1;
+      if (wet) {
+        gb = (time - (s.t0 + ub / last * (s.t1 - s.t0))) / s.dry;
+        if (gb <= 0) continue;
+        if (gb > 1) gb = 1;
+        gb = 1 - (1 - gb) * (1 - gb);
+      }
+      i = Math.min(s.n - 2, Math.floor(ub)); t = ub - i;
+      x = s.pts[2 * i] + (s.pts[2 * i + 2] - s.pts[2 * i]) * t + s.nrm[2 * i] * d * gb;
+      y = s.pts[2 * i + 1] + (s.pts[2 * i + 3] - s.pts[2 * i + 1]) * t + s.nrm[2 * i + 1] * d * gb;
+      r *= 0.25 + 0.75 * gb;
+      grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+      grad.addColorStop(0, rgba(s.r, s.g, s.b, s.alpha * 0.55));
+      grad.addColorStop(0.5, rgba(s.r, s.g, s.b, s.alpha * 0.22));
+      grad.addColorStop(1, rgba(s.r, s.g, s.b, 0));
+      ctx.fillStyle = grad;
+      ctx.fillRect(x - r, y - r, 2 * r, 2 * r);
+    }
+  }
+
+  function rgba(r, g, b, a) {
+    return 'rgba(' + Math.round(clamp255(r)) + ',' + Math.round(clamp255(g)) + ',' + Math.round(clamp255(b)) + ',' + a.toFixed(3) + ')';
+  }
+
+  // Washes are always drawn whole (u0 is ignored); see Player for how they
+  // are animated.
   function drawStroke(ctx, s, u0, u1) {
+    if (s.kind === 'wash') { drawWash(ctx, s, u1); return; }
     if (u1 <= u0) return;
-    if (s.kind === 'wash') drawWash(ctx, s, u0, u1);
+    if (s.kind === 'line') drawLine(ctx, s, u0, u1);
     else drawBundle(ctx, s, u0, u1);
   }
 
+  function catmull(a, b, c, d, t) {
+    return 0.5 * (2 * b + (c - a) * t + (2 * a - 5 * b + 4 * c - d) * t * t + (3 * b - a - 3 * c + d) * t * t * t);
+  }
+
+  // Rounds a traced polyline into a smooth curve with points about seg apart.
+  function smoothPath(xs, ys, seg) {
+    var n = xs.length, ox = [xs[0]], oy = [ys[0]], i, j, m, a, d, t;
+    for (i = 0; i < n - 1; i++) {
+      a = i > 0 ? i - 1 : i; d = i < n - 2 ? i + 2 : i + 1;
+      m = Math.sqrt((xs[i + 1] - xs[i]) * (xs[i + 1] - xs[i]) + (ys[i + 1] - ys[i]) * (ys[i + 1] - ys[i]));
+      m = Math.max(1, Math.min(12, Math.ceil(m / seg)));
+      for (j = 1; j <= m; j++) {
+        t = j / m;
+        ox.push(catmull(xs[a], xs[i], xs[i + 1], xs[d], t));
+        oy.push(catmull(ys[a], ys[i], ys[i + 1], ys[d], t));
+      }
+    }
+    return [ox, oy];
+  }
+
   function makeStroke(xs, ys, w, r, g, b, seed, layer, nLayers, st, L) {
+    var i, a, c, dx, dy, len, total = 0, px = Math.min(1, L / 1024), sm;
+    if (st.kind === 'line' || st.kind === 'wash') {
+      if (st.kind === 'line') {
+        // The slight bow of a line drawn from the wrist.
+        var jr = mulberry32(seed ^ 0x5bd1e995), m = xs.length - 1;
+        dx = xs[m] - xs[0]; dy = ys[m] - ys[0];
+        var bow = (jr() - 0.5) * 0.09;
+        for (i = 1; i < m; i++) {
+          a = Math.sin(Math.PI * i / m) * bow + (jr() - 0.5) * 0.012;
+          xs[i] -= dy * a; ys[i] += dx * a;
+        }
+      }
+      sm = smoothPath(xs, ys, st.kind === 'line' ? 5 : Math.max(3, w * 0.15));
+      xs = sm[0]; ys = sm[1];
+    }
     var n = xs.length, pts = new Float32Array(2 * n), nrm = new Float32Array(2 * n);
-    var i, a, c, dx, dy, len, total = 0, px = Math.min(1, L / 1024);
     for (i = 0; i < n; i++) { pts[2 * i] = xs[i]; pts[2 * i + 1] = ys[i]; }
     for (i = 0; i < n; i++) {
       a = i > 0 ? i - 1 : 0; c = i < n - 1 ? i + 1 : n - 1;
@@ -267,9 +378,19 @@
       s.lw0 = st.lw * px * 0.8; s.lw1 = st.lw * px * 1.25;
       s.alpha = st.alpha;
       s.shade = st.shade;
+    } else if (st.kind === 'line') {
+      s.w = st.lw * px; // a line has no brush width; this only feeds the timing
+      s.lw0 = st.lw * px * 0.8; s.lw1 = st.lw * px * 1.25;
+      s.alpha = st.alpha;
+      s.shade = st.shade;
     } else {
-      s.alpha = st.alpha[0] + (st.alpha[1] - st.alpha[0]) * (layer / Math.max(1, nLayers - 1));
+      var late = layer / Math.max(1, nLayers - 1);
+      s.alpha = st.alpha[0] + (st.alpha[1] - st.alpha[0]) * late;
       s.pool = st.pool;
+      // Early washes go on wet and spread; later ones go on drier paper, so
+      // they bleed less and dry faster.
+      s.bleed = st.bleed * (1 - 0.65 * late);
+      s.dry = st.dryTime * Math.max(0.15, Math.min(1.3, w / (0.05 * L)));
     }
     return s;
   }
@@ -385,13 +506,16 @@
         cells.length = layer.cap;
       }
 
-      var layerStrokes = [];
+      // One group of strokes per cell: a single brush stroke, or for pencils
+      // the lines of one hatched patch, which stay together in drawing order.
+      var groups = [], layerStrokes = [];
       for (var ci = 0; ci < cells.length; ci++) {
-        layerStrokes.push(trace(cells[ci].x, cells[ci].y));
+        groups.push(st.kind === 'line' ? hatchPatch(cells[ci]) : [trace(cells[ci].x, cells[ci].y)]);
       }
       // Loosely dark-to-light, the way an artist builds a layer.
-      layerStrokes.forEach(function (s) { s.key = rnd() + 0.6 * (0.299 * s.r + 0.587 * s.g + 0.114 * s.b) / 255; });
-      layerStrokes.sort(function (a, b) { return a.key - b.key; });
+      groups.forEach(function (g) { var s = g[0]; g.key = rnd() + 0.6 * (0.299 * s.r + 0.587 * s.g + 0.114 * s.b) / 255; });
+      groups.sort(function (a, b) { return a.key - b.key; });
+      groups.forEach(function (g) { for (var j = 0; j < g.length; j++) layerStrokes.push(g[j]); });
 
       for (i = 0; i < layerStrokes.length; i++) {
         drawStroke(ctx, layerStrokes[i], 0, layerStrokes[i].n - 1);
@@ -404,7 +528,40 @@
     if (onProgress) onProgress(1, 'Ready');
     return { width: W, height: H, strokes: strokes, layers: layerInfo, duration: duration, style: opts.style || 'oil' };
 
-    function trace(x0, y0) {
+    // Stroke direction at pixel k: along the edge where there is one, else a
+    // loose, slowly turning hatch.
+    function dirAt(k, px, py) {
+      var a = jxx[k] - jyy[k], b = 2 * jxy[k], th;
+      if (Math.sqrt(a * a + b * b) > 1.5) {
+        th = 0.5 * Math.atan2(b, a);              // dominant gradient direction
+        return [-Math.sin(th), Math.cos(th)];     // draw along the edge
+      }
+      th = -0.7 + 0.8 * Math.sin(px / L * 5.1 + 1.3) * Math.cos(py / L * 4.3 + 0.7);
+      return [Math.cos(th), Math.sin(th)];
+    }
+
+    // Pencil: shade a patch the way a hand does, one line after another,
+    // mostly back and forth, each with its own start, length and slant.
+    function hatchPatch(c) {
+      var d = dirAt(clampInt(c.y, H) * W + clampInt(c.x, W), c.x, c.y), tx = d[0], ty = d[1];
+      var sp = Math.max(st.spacing * Math.min(1, L / 1024), w / 28);
+      var n = Math.max(1, Math.round(w * 0.9 / sp));
+      var sgn = rnd() < 0.5 ? 1 : -1, out = [], j, f, off, steps, back;
+      for (j = 0; j < n; j++) {
+        f = n === 1 ? 0 : (j / (n - 1)) * 2 - 1;
+        off = f * w * 0.43 + (rnd() - 0.5) * sp * 0.9;
+        steps = layer.minSteps + Math.round(rnd() * (layer.maxSteps - layer.minSteps));
+        back = (0.15 + rnd() * 0.35) * steps * step;
+        out.push(trace(c.x - ty * off - sgn * tx * back, c.y + tx * off - sgn * ty * back,
+          { dx: sgn * tx, dy: sgn * ty, steps: steps, rot: (rnd() - 0.5) * 0.14 }));
+        if (rnd() < 0.85) sgn = -sgn;
+      }
+      return out;
+    }
+
+    function trace(x0, y0, hint) {
+      var maxSteps = hint ? hint.steps : layer.maxSteps;
+      var rc = hint ? Math.cos(hint.rot) : 1, rs = hint ? Math.sin(hint.rot) : 0, d;
       var xi = clampInt(x0, W), yi = clampInt(y0, H), k = yi * W + xi;
       var lj = (rnd() - 0.5) * 9, cr, cg, cb;
       if (st.fixed) {
@@ -415,9 +572,9 @@
         cb = bb[k] + lj + (rnd() - 0.5) * 5;
       }
       var xs = [x0], ys = [y0], px = x0, py = y0, ldx = 0, ldy = 0;
-      var a, b, mag, th, tx, ty, n, dc, ds, margin = w * 0.5;
+      var tx, ty, n, dc, ds, margin = w * 0.5;
 
-      for (var s = 1; s <= layer.maxSteps; s++) {
+      for (var s = 1; s <= maxSteps; s++) {
         xi = clampInt(px, W); yi = clampInt(py, H); k = yi * W + xi;
         if (s > layer.minSteps) {
           // Stop once the canvas already matches the photo better than this colour would.
@@ -425,18 +582,10 @@
           ds = Math.abs(br[k] - cr) + Math.abs(bg[k] - cg) + Math.abs(bb[k] - cb);
           if (dc < ds) break;
         }
-        a = jxx[k] - jyy[k]; b = 2 * jxy[k];
-        mag = Math.sqrt(a * a + b * b);
-        if (mag > 1.5) {
-          th = 0.5 * Math.atan2(b, a);            // dominant gradient direction
-          tx = -Math.sin(th); ty = Math.cos(th);  // draw along the edge
-        } else {
-          // Flat area: a loose, slowly turning hatch.
-          th = -0.7 + 0.8 * Math.sin(px / L * 5.1 + 1.3) * Math.cos(py / L * 4.3 + 0.7);
-          tx = Math.cos(th); ty = Math.sin(th);
-        }
+        d = dirAt(k, px, py);
+        tx = d[0] * rc - d[1] * rs; ty = d[0] * rs + d[1] * rc;
         if (s === 1) {
-          if (rnd() < 0.5) { tx = -tx; ty = -ty; }
+          if (hint ? tx * hint.dx + ty * hint.dy < 0 : rnd() < 0.5) { tx = -tx; ty = -ty; }
         } else {
           if (tx * ldx + ty * ldy < 0) { tx = -tx; ty = -ty; }
           tx = 0.7 * tx + 0.3 * ldx; ty = 0.7 * ty + 0.3 * ldy;
@@ -526,11 +675,14 @@
 
   /* ---------- playback ---------- */
 
+  var MAX_WET = 120; // most washes kept wet (redrawn per frame) at once
+
   /** Plays a plan onto a visible canvas in real time. */
   function Player(display, plan) {
     this.display = display;
     this.plan = plan;
     this.style = STYLES[plan.style] || STYLES.oil;
+    this.wet = this.style.kind === 'wash';
     this.dctx = display.getContext('2d');
     this.paint = document.createElement('canvas');
     this.paint.width = plan.width; this.paint.height = plan.height;
@@ -562,6 +714,14 @@
     var c = this.dctx;
     c.globalCompositeOperation = 'source-over';
     c.drawImage(this.paint, 0, 0);
+    if (this.wet) {
+      // Washes that are still wet are redrawn every frame so they can spread.
+      var strokes = this.plan.strokes, i, s;
+      for (i = this.cur; i < strokes.length && strokes[i].t0 < this.time; i++) {
+        s = strokes[i];
+        drawWash(c, s, (this.time - s.t0) / (s.t1 - s.t0) * (s.n - 1), this.time);
+      }
+    }
     c.globalCompositeOperation = 'multiply';
     c.drawImage(this.texture, 0, 0);
     c.globalCompositeOperation = 'source-over';
@@ -570,7 +730,20 @@
   Player.prototype.advanceTo = function (t) {
     var strokes = this.plan.strokes, s, u;
     this.time = Math.min(t, this.plan.duration);
-    while (this.cur < strokes.length) {
+    if (this.wet) {
+      // A wash only goes onto the painting once it has dried, always whole
+      // and in order, so the painting is the same however it was reached.
+      var done = this.time >= this.plan.duration, live = this.cur;
+      while (live < strokes.length && strokes[live].t0 < this.time) live++;
+      while (this.cur < live) {
+        s = strokes[this.cur];
+        if (!done && live - this.cur <= MAX_WET && this.time < s.t1 + s.dry) break;
+        drawWash(this.pctx, s, s.n - 1);
+        this.cur++;
+        if (this.cur % this.cpEvery === 0 && !this.cps[this.cur / this.cpEvery]) this._snap();
+      }
+    }
+    while (!this.wet && this.cur < strokes.length) {
       s = strokes[this.cur];
       if (this.time >= s.t1) {
         drawStroke(this.pctx, s, this.drawn, s.n - 1);
