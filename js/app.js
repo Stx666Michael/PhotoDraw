@@ -11,10 +11,10 @@
     play: $('play'), iconPlay: $('iconPlay'), iconPause: $('iconPause'), replay: $('replay'),
     stage: $('stage'), clock: $('clock'), scrub: $('scrub'), speedChips: $('speedChips'),
     thumb: $('thumb'), statComplexity: $('statComplexity'), statStrokes: $('statStrokes'),
-    statLength: $('statLength'), options: $('options'), styleChips: $('styleChips'), lenChips: $('lenChips'), startNote: $('startNote'), meta: $('meta'), saveVideo: $('saveVideo'), saveImage: $('saveImage'), note: $('note')
+    statLength: $('statLength'), options: $('options'), styleChips: $('styleChips'), lenChips: $('lenChips'), startNote: $('startNote'), meta: $('meta'), saveVideo: $('saveVideo'), saveImage: $('saveImage'), note: $('note'), queue: $('queue'), queueList: $('queueList')
   };
 
-  var player = null, recording = false, job = 0, baseName = 'photodraw';
+  var player = null, job = 0, baseName = 'photodraw';
   var work = null, complexity = null, opts = loadOpts();
   var SPEEDS = [0.5, 1, 2, 4], speed = 1, scrubbing = false, wasPlaying = false, scrubTarget = null;
 
@@ -46,7 +46,6 @@
     b.setAttribute('aria-checked', checked ? 'true' : 'false');
     b.dataset.group = group;
     b.dataset.value = value;
-    b.disabled = recording;
     b.textContent = label;
     if (sub) {
       var i = document.createElement('small');
@@ -71,7 +70,7 @@
 
   function onChoose(e) {
     var b = e.target.closest('.chip');
-    if (!b || recording || b.getAttribute('aria-checked') === 'true') return;
+    if (!b || b.getAttribute('aria-checked') === 'true') return;
     opts[b.dataset.group] = b.dataset.value;
     saveOpts();
     renderOptions();
@@ -275,7 +274,7 @@
     el.speedChips.textContent = '';
     SPEEDS.forEach(function (v) {
       var b = chip('speed', String(v), v + '\u00d7', '', v === speed);
-      b.disabled = recording || !player;
+      b.disabled = !player;
       el.speedChips.appendChild(b);
     });
   }
@@ -295,7 +294,7 @@
   }
 
   function onScrubInput() {
-    if (!player || recording) return;
+    if (!player) return;
     var f = el.scrub.value / 1000;
     el.scrub.style.setProperty('--fill', (f * 100).toFixed(2) + '%');
     var pending = scrubTarget != null;
@@ -304,7 +303,7 @@
   }
 
   function scrubStart() {
-    if (!player || recording || scrubbing) return;
+    if (!player || scrubbing) return;
     scrubbing = true;
     wasPlaying = player.playing;
     player.pause();
@@ -351,65 +350,148 @@
     return null;
   }
 
-  // Replays the painting from the start while recording the canvas. The
-  // recording is real time, so it takes as long as the animation.
-  function saveVideo() {
-    if (!player || recording) return;
-    var fmt = videoFormat();
-    if (!fmt) { el.note.textContent = 'This browser cannot record video from a canvas. Try a current Chrome, Edge, Firefox or Safari.'; return; }
+  /* ---------- video render queue ---------- */
 
-    var p = player, stream = el.canvas.captureStream(30), chunks = [], rec;
-    try {
-      rec = new MediaRecorder(stream, { mimeType: fmt.mime, videoBitsPerSecond: 8000000 });
-    } catch (e) {
-      el.note.textContent = 'Video recording could not start in this browser.';
-      return;
-    }
-    recording = true;
-    setControls(false);
-    renderOptions();
-    renderSpeed();
-    el.note.textContent = 'Recording the painting in real time — keep this tab visible. The video downloads when it finishes.';
+  // Each video is rendered by its own off-screen player from a snapshot of the
+  // plan, so it never touches the visible player: keep watching, scrub, change
+  // speed or even load another photo meanwhile. Rendering is real time (the
+  // video is recorded as it plays), at the playback speed chosen when it was
+  // queued, and jobs run one after another.
+  var HOLD_MS = 1500;
+  var queue = [], running = null, jobId = 0;
 
-    rec.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
-    rec.onstop = function () {
-      stream.getTracks().forEach(function (t) { t.stop(); });
-      recording = false;
-      renderOptions();
-      p.speed = speed;
-      renderSpeed();
-      if (player !== p) return; // a new photo was loaded meanwhile
-      p.onEnd = function () { syncPlayButton(); };
-      setControls(true);
-      syncPlayButton();
-      if (chunks.length) {
-        download(new Blob(chunks, { type: fmt.mime.split(';')[0] }), baseName + '-' + opts.style + '.' + fmt.ext);
-        el.note.textContent = 'Video saved.';
-      } else {
-        el.note.textContent = 'The recording came back empty. Please try again.';
-      }
-    };
-
-    p.pause();
-    p.reset();
-    p.speed = 1; // always record in real time
-    p.onEnd = function () {
-      syncPlayButton();
-      // Hold the finished painting for a moment before the video ends.
-      var until = performance.now() + 1500;
-      (function hold(now) {
-        if (player !== p || now >= until) { if (rec.state !== 'inactive') rec.stop(); return; }
-        p.composite();
-        requestAnimationFrame(hold);
-      })(performance.now());
-    };
-    rec.start(250);
-    p.play();
-    syncPlayButton();
+  function jobLabel(j) {
+    return j.name + ' · ' + j.medium + (j.speed !== 1 ? ' · ' + j.speed + '×' : '') + ' · ' + clock(j.videoSec);
   }
 
+  function renderQueue() {
+    el.queue.hidden = !queue.length;
+    el.queueList.textContent = '';
+    queue.forEach(function (j) {
+      var li = document.createElement('li'), top = document.createElement('div'), name = document.createElement('span');
+      var state = document.createElement('span'), x = document.createElement('button'), bar = document.createElement('div'), fill = document.createElement('div');
+      li.className = 'job';
+      top.className = 'job-top';
+      name.className = 'job-name'; name.textContent = jobLabel(j);
+      state.className = 'job-state num';
+      x.type = 'button'; x.className = 'btn ghost job-x';
+      x.textContent = j.state === 'queued' || j.state === 'rendering' ? 'Cancel' : 'Dismiss';
+      x.addEventListener('click', function () { removeJob(j); });
+      bar.className = 'bar'; fill.className = 'bar-fill';
+      bar.appendChild(fill);
+      top.appendChild(name); top.appendChild(state); top.appendChild(x);
+      li.appendChild(top);
+      if (j.state === 'rendering' || j.state === 'queued') li.appendChild(bar);
+      j.els = { state: state, fill: fill };
+      el.queueList.appendChild(li);
+      updateJob(j);
+    });
+  }
+
+  function updateJob(j) {
+    if (!j.els) return;
+    var text = { queued: 'Waiting', rendering: Math.round(j.frac * 100) + '%', done: 'Saved', failed: j.error || 'Failed' }[j.state];
+    j.els.state.textContent = text;
+    j.els.state.classList.toggle('bad', j.state === 'failed');
+    j.els.fill.style.width = Math.round(j.frac * 100) + '%';
+  }
+
+  function removeJob(j) {
+    if (j.cancel) j.cancel();
+    queue.splice(queue.indexOf(j), 1);
+    j.state = 'cancelled';
+    renderQueue();
+    if (running === j) { running = null; runNext(); }
+  }
+
+  function runNext() {
+    if (running) return;
+    var j = queue.filter(function (q) { return q.state === 'queued'; })[0];
+    if (!j) return;
+    running = j;
+    j.state = 'rendering';
+    renderQueue();
+    renderJob(j, function (error) {
+      if (running !== j) return; // cancelled meanwhile
+      running = null;
+      j.state = error ? 'failed' : 'done';
+      j.error = error;
+      j.frac = error ? 0 : 1;
+      j.cancel = null;
+      renderQueue();
+      runNext();
+    });
+  }
+
+  function renderJob(j, finish) {
+    var plan = j.plan, fmt = j.fmt, chunks = [], c, p, stream, rec, timer = 0, stopped = false;
+    try {
+      c = document.createElement('canvas');
+      c.width = plan.width; c.height = plan.height;
+      p = new PhotoDraw.Player(c, plan);
+      stream = c.captureStream(30);
+      rec = new MediaRecorder(stream, { mimeType: fmt.mime, videoBitsPerSecond: 8000000 });
+    } catch (e) {
+      finish('Could not start');
+      return;
+    }
+    function end() {
+      clearInterval(timer);
+      stream.getTracks().forEach(function (t) { t.stop(); });
+    }
+    j.cancel = function () {
+      stopped = true;
+      end();
+      if (rec.state !== 'inactive') rec.stop();
+    };
+    rec.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
+    rec.onerror = function () { if (!stopped) { stopped = true; end(); finish('Recording failed'); } };
+    rec.onstop = function () {
+      if (stopped) return;
+      stopped = true;
+      if (!chunks.length) { finish('Came back empty'); return; }
+      download(new Blob(chunks, { type: fmt.mime.split(';')[0] }), j.file + '.' + fmt.ext);
+      finish(null);
+    };
+
+    var t0 = performance.now(), doneAt = 0;
+    p.reset();
+    rec.start(250);
+    timer = setInterval(function () {
+      var now = performance.now();
+      p.advanceTo((now - t0) / 1000 * j.speed);
+      j.frac = Math.min(1, (now - t0) / 1000 / j.videoSec);
+      updateJob(j);
+      if (p.ended) {
+        // Hold the finished painting for a moment before the video ends.
+        if (!doneAt) doneAt = now;
+        if (now - doneAt >= HOLD_MS) { clearInterval(timer); if (rec.state !== 'inactive') rec.stop(); }
+      }
+    }, 1000 / 30);
+  }
+
+  function saveVideo() {
+    if (!player) return;
+    var fmt = videoFormat();
+    if (!fmt) { el.note.textContent = 'This browser cannot record video from a canvas. Try a current Chrome, Edge, Firefox or Safari.'; return; }
+    var plan = player.plan, medium = PhotoDraw.STYLES[opts.style].name, name = baseName.replace(/-painting$/, '');
+    queue.push({
+      id: ++jobId, plan: plan, fmt: fmt, speed: speed, medium: medium, name: name,
+      file: baseName + '-' + opts.style + (speed !== 1 ? '-' + speed + 'x' : ''),
+      videoSec: plan.duration / speed + HOLD_MS / 1000,
+      state: 'queued', frac: 0, error: null, cancel: null, els: null
+    });
+    el.note.textContent = queue.length > 1 ? 'Added to the render queue.' : '';
+    renderQueue();
+    runNext();
+  }
+
+  window.addEventListener('beforeunload', function (e) {
+    if (queue.some(function (j) { return j.state === 'queued' || j.state === 'rendering'; })) { e.preventDefault(); e.returnValue = ''; }
+  });
+
   function saveImage() {
-    if (!player || recording) return;
+    if (!player) return;
     player.finish();
     syncPlayButton();
     el.canvas.toBlob(function (blob) {
@@ -431,12 +513,10 @@
     document.addEventListener(t, function (e) { e.preventDefault(); el.drop.classList.remove('over'); });
   });
   document.addEventListener('drop', function (e) {
-    if (recording) return;
     var f = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
     if (f) loadFile(f);
   });
   document.addEventListener('paste', function (e) {
-    if (recording) return;
     var items = (e.clipboardData && e.clipboardData.files) || [];
     for (var i = 0; i < items.length; i++) {
       if (/^image\//.test(items[i].type)) { loadFile(items[i]); return; }
@@ -449,7 +529,6 @@
   });
 
   el.newPhoto.addEventListener('click', function () {
-    if (recording) return;
     job++;
     stopPlayer();
     el.studio.hidden = true;
@@ -461,13 +540,13 @@
   });
 
   el.play.addEventListener('click', function () {
-    if (!player || recording) return;
+    if (!player) return;
     if (player.playing) player.pause(); else player.play();
     syncPlayButton();
   });
 
   el.replay.addEventListener('click', function () {
-    if (!player || recording) return;
+    if (!player) return;
     player.pause();
     player.reset();
     player.play();
@@ -488,7 +567,7 @@
   el.saveImage.addEventListener('click', saveImage);
 
   document.addEventListener('keydown', function (e) {
-    if (e.code === 'Space' && player && !recording && !/^(BUTTON|INPUT|A)$/.test(e.target.tagName)) {
+    if (e.code === 'Space' && player && !/^(BUTTON|INPUT|A)$/.test(e.target.tagName)) {
       e.preventDefault();
       el.play.click();
     }

@@ -168,6 +168,17 @@ main {
   .frame canvas { max-height: calc(100vh - 340px); }
 }
 
+/* ---------- render queue ---------- */
+.queue { width: 100%; max-width: 720px; margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line); display: grid; gap: 8px; }
+.queue h2 { margin: 0; font: 600 14px/1.2 var(--sans); color: var(--muted); }
+.queue-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.job { background: var(--panel); border: 1px solid var(--line); border-radius: 9px; padding: 8px 10px; display: grid; gap: 7px; }
+.job-top { display: flex; align-items: center; gap: 10px; }
+.job-name { flex: 1; min-width: 0; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-state { color: var(--muted); font-size: 12.5px; }
+.job-state.bad { color: var(--danger); }
+.job-x { padding: 5px 10px; font-size: 12.5px; }
+
 /* ---------- options ---------- */
 .options { width: 100%; max-width: 720px; display: grid; gap: 14px; text-align: left; }
 .opt { display: grid; gap: 7px; }

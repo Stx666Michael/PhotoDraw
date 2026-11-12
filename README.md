@@ -12,7 +12,7 @@ Open `index.html` in a browser. There is no build step, server or dependency.
 4. Watch it get painted: broad strokes first, then smaller and smaller ones. Drag the progress bar to preview any moment, and use the speed buttons (0.5×, 1×, 2×, 4×) to slow down or skip ahead.
 5. **Save video** records the animation (MP4 or WebM, depending on the browser); **Save painting** downloads the finished picture as a PNG.
 
-Video is always recorded at 1× speed. Photos never leave the device; everything runs in the browser.
+Videos render in the background, so you can keep watching, scrub or change the medium meanwhile. They are recorded at the playback speed selected when you click **Save video**, so a 2× video is half as long, and they take that long to render. Each click adds another video to a queue (shown below the player) that renders one after another and downloads each file when it finishes. Photos never leave the device; everything runs in the browser.
 
 ## How it works
 
