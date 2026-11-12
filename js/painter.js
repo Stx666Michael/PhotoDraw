@@ -536,6 +536,11 @@
     this.paint.width = plan.width; this.paint.height = plan.height;
     this.pctx = this.paint.getContext('2d');
     this.texture = makeTexture(this.style.tex, plan.width, plan.height);
+    this.speed = 1;
+    // Snapshots of the painting every so often, so scrubbing backwards only
+    // has to repaint a small part of it.
+    this.cps = [];
+    this.cpEvery = Math.max(1, Math.ceil(plan.strokes.length / 12));
     this.onFrame = null;
     this.onEnd = null;
     this.playing = false;
@@ -570,6 +575,7 @@
       if (this.time >= s.t1) {
         drawStroke(this.pctx, s, this.drawn, s.n - 1);
         this.cur++; this.drawn = 0;
+        if (this.cur % this.cpEvery === 0 && !this.cps[this.cur / this.cpEvery]) this._snap();
       } else if (this.time > s.t0) {
         u = (this.time - s.t0) / (s.t1 - s.t0) * (s.n - 1);
         drawStroke(this.pctx, s, this.drawn, u);
@@ -578,19 +584,48 @@
       } else break;
     }
     this.composite();
+    var finishing = this.time >= this.plan.duration && !this.ended;
+    if (finishing) { this.ended = true; this.playing = false; }
     if (this.onFrame) this.onFrame(this);
-    if (this.time >= this.plan.duration && !this.ended) {
-      this.ended = true;
-      this.playing = false;
-      if (this.onEnd) this.onEnd(this);
+    if (finishing && this.onEnd) this.onEnd(this);
+  };
+
+  Player.prototype._snap = function () {
+    var c = document.createElement('canvas');
+    c.width = this.plan.width; c.height = this.plan.height;
+    c.getContext('2d').drawImage(this.paint, 0, 0);
+    this.cps[this.cur / this.cpEvery] = c;
+  };
+
+  /** Jumps to time t (seconds), forwards or backwards, without changing play state. */
+  Player.prototype.seek = function (t) {
+    t = Math.max(0, Math.min(this.plan.duration, t));
+    if (t < this.time) {
+      var strokes = this.plan.strokes, lo = 0, hi = strokes.length, mid, k;
+      while (lo < hi) { // first stroke that is not finished at t
+        mid = (lo + hi) >> 1;
+        if (strokes[mid].t1 > t) hi = mid; else lo = mid + 1;
+      }
+      k = Math.floor(lo / this.cpEvery);
+      while (k > 0 && !this.cps[k]) k--;
+      if (k > 0) {
+        this.pctx.drawImage(this.cps[k], 0, 0);
+        this.cur = k * this.cpEvery;
+      } else {
+        fillGround(this.pctx, this.plan.width, this.plan.height, this.style);
+        this.cur = 0;
+      }
+      this.drawn = 0;
+      this.ended = false;
     }
+    this.advanceTo(t);
   };
 
   Player.prototype._tick = function (now) {
     if (!this.playing) return;
     var dt = Math.min(100, now - this._last);
     this._last = now;
-    this.advanceTo(this.time + dt / 1000);
+    this.advanceTo(this.time + dt / 1000 * this.speed);
     if (this.playing) this._raf = requestAnimationFrame(this._tick);
   };
 

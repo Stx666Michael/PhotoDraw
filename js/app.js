@@ -9,13 +9,14 @@
     sample: $('sample'), error: $('error'), newPhoto: $('newPhoto'),
     canvas: $('canvas'), busy: $('busy'), busyText: $('busyText'), busyBar: $('busyBar'),
     play: $('play'), iconPlay: $('iconPlay'), iconPause: $('iconPause'), replay: $('replay'),
-    stage: $('stage'), clock: $('clock'), progressBar: $('progressBar'), progressFill: $('progressFill'),
+    stage: $('stage'), clock: $('clock'), scrub: $('scrub'), speedChips: $('speedChips'),
     thumb: $('thumb'), statComplexity: $('statComplexity'), statStrokes: $('statStrokes'),
     statLength: $('statLength'), options: $('options'), styleChips: $('styleChips'), lenChips: $('lenChips'), startNote: $('startNote'), meta: $('meta'), saveVideo: $('saveVideo'), saveImage: $('saveImage'), note: $('note')
   };
 
   var player = null, recording = false, job = 0, baseName = 'photodraw';
   var work = null, complexity = null, opts = loadOpts();
+  var SPEEDS = [0.5, 1, 2, 4], speed = 1, scrubbing = false, wasPlaying = false, scrubTarget = null;
 
   /* ---------- options: medium and length ---------- */
 
@@ -220,10 +221,12 @@
     el.statLength.textContent = clock(duration);
 
     player = new PhotoDraw.Player(el.canvas, plan);
+    player.speed = speed;
     player.onFrame = updateProgress;
     player.onEnd = function () { syncPlayButton(); };
     setBusy(false);
     setControls(true);
+    renderSpeed();
     updateProgress(player);
     player.play();
     syncPlayButton();
@@ -247,7 +250,7 @@
   }
 
   function setControls(on) {
-    [el.play, el.replay, el.saveVideo, el.saveImage].forEach(function (b) { b.disabled = !on; });
+    [el.play, el.replay, el.scrub, el.saveVideo, el.saveImage].forEach(function (b) { b.disabled = !on; });
   }
 
   function clock(sec) {
@@ -257,11 +260,64 @@
 
   function updateProgress(p) {
     var f = p.time / p.plan.duration;
-    el.progressFill.style.width = (f * 100).toFixed(2) + '%';
-    el.progressBar.setAttribute('aria-valuenow', Math.round(f * 100));
+    if (!scrubbing) setScrub(f);
     el.clock.textContent = clock(p.time) + ' / ' + clock(p.plan.duration);
     var stage = p.stageName();
     if (el.stage.textContent !== stage) el.stage.textContent = stage;
+  }
+
+  function setScrub(f) {
+    el.scrub.value = Math.round(f * 1000);
+    el.scrub.style.setProperty('--fill', (f * 100).toFixed(2) + '%');
+  }
+
+  function renderSpeed() {
+    el.speedChips.textContent = '';
+    SPEEDS.forEach(function (v) {
+      var b = chip('speed', String(v), v + '\u00d7', '', v === speed);
+      b.disabled = recording || !player;
+      el.speedChips.appendChild(b);
+    });
+  }
+
+  function setSpeed(v) {
+    speed = v;
+    if (player) player.speed = v;
+    renderSpeed();
+  }
+
+  // Seeks are applied at most once per frame, so dragging stays smooth.
+  function applyScrub() {
+    var t = scrubTarget;
+    scrubTarget = null;
+    if (t == null || !player) return;
+    player.seek(t * player.plan.duration);
+  }
+
+  function onScrubInput() {
+    if (!player || recording) return;
+    var f = el.scrub.value / 1000;
+    el.scrub.style.setProperty('--fill', (f * 100).toFixed(2) + '%');
+    var pending = scrubTarget != null;
+    scrubTarget = f;
+    if (!pending) requestAnimationFrame(applyScrub);
+  }
+
+  function scrubStart() {
+    if (!player || recording || scrubbing) return;
+    scrubbing = true;
+    wasPlaying = player.playing;
+    player.pause();
+    syncPlayButton();
+  }
+
+  function scrubEnd() {
+    if (!scrubbing) return;
+    scrubbing = false;
+    applyScrub();
+    if (player && wasPlaying && !player.ended) player.play();
+    wasPlaying = false;
+    syncPlayButton();
   }
 
   function syncPlayButton() {
@@ -312,6 +368,7 @@
     recording = true;
     setControls(false);
     renderOptions();
+    renderSpeed();
     el.note.textContent = 'Recording the painting in real time — keep this tab visible. The video downloads when it finishes.';
 
     rec.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
@@ -319,6 +376,8 @@
       stream.getTracks().forEach(function (t) { t.stop(); });
       recording = false;
       renderOptions();
+      p.speed = speed;
+      renderSpeed();
       if (player !== p) return; // a new photo was loaded meanwhile
       p.onEnd = function () { syncPlayButton(); };
       setControls(true);
@@ -333,6 +392,7 @@
 
     p.pause();
     p.reset();
+    p.speed = 1; // always record in real time
     p.onEnd = function () {
       syncPlayButton();
       // Hold the finished painting for a moment before the video ends.
@@ -415,6 +475,15 @@
   });
 
   el.options.addEventListener('click', onChoose);
+  el.speedChips.addEventListener('click', function (e) {
+    var b = e.target.closest('.chip');
+    if (b && !b.disabled) setSpeed(parseFloat(b.dataset.value));
+  });
+  el.scrub.addEventListener('pointerdown', scrubStart);
+  el.scrub.addEventListener('input', onScrubInput);
+  el.scrub.addEventListener('change', scrubEnd);
+  window.addEventListener('pointerup', scrubEnd);
+  window.addEventListener('pointercancel', scrubEnd);
   el.saveVideo.addEventListener('click', saveVideo);
   el.saveImage.addEventListener('click', saveImage);
 
@@ -426,4 +495,5 @@
   });
   dock();
   renderOptions();
+  renderSpeed();
 })();

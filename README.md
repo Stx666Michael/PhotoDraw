@@ -9,10 +9,10 @@ Open `index.html` in a browser. There is no build step, server or dependency.
 1. Drop, choose or paste a photo (or try the built-in sample).
 2. Pick a **medium**: oil paint, watercolor, colored pencil, graphite, charcoal or pen & ink.
 3. Pick a **length**: Short, Standard, Long or Epic. Longer animations use more, smaller strokes, so they show finer detail. Changing either re-paints the same photo.
-4. Watch it get painted: broad strokes first, then smaller and smaller ones.
+4. Watch it get painted: broad strokes first, then smaller and smaller ones. Drag the progress bar to preview any moment, and use the speed buttons (0.5×, 1×, 2×, 4×) to slow down or skip ahead.
 5. **Save video** records the animation (MP4 or WebM, depending on the browser); **Save painting** downloads the finished picture as a PNG.
 
-Photos never leave the device; everything runs in the browser.
+Video is always recorded at 1× speed. Photos never leave the device; everything runs in the browser.
 
 ## How it works
 
