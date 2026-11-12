@@ -11,10 +11,77 @@
     play: $('play'), iconPlay: $('iconPlay'), iconPause: $('iconPause'), replay: $('replay'),
     stage: $('stage'), clock: $('clock'), progressBar: $('progressBar'), progressFill: $('progressFill'),
     thumb: $('thumb'), statComplexity: $('statComplexity'), statStrokes: $('statStrokes'),
-    statLength: $('statLength'), saveVideo: $('saveVideo'), saveImage: $('saveImage'), note: $('note')
+    statLength: $('statLength'), options: $('options'), styleChips: $('styleChips'), lenChips: $('lenChips'), startNote: $('startNote'), meta: $('meta'), saveVideo: $('saveVideo'), saveImage: $('saveImage'), note: $('note')
   };
 
   var player = null, recording = false, job = 0, baseName = 'photodraw';
+  var work = null, complexity = null, opts = loadOpts();
+
+  /* ---------- options: medium and length ---------- */
+
+  function loadOpts() {
+    var o = { style: 'oil', length: 'standard' };
+    try {
+      var saved = JSON.parse(localStorage.getItem('photodraw-options') || '{}');
+      if (PhotoDraw.STYLES[saved.style]) o.style = saved.style;
+      if (PhotoDraw.LENGTHS.some(function (l) { return l.id === saved.length; })) o.length = saved.length;
+    } catch (e) { /* storage unavailable: defaults are fine */ }
+    return o;
+  }
+
+  function saveOpts() {
+    try { localStorage.setItem('photodraw-options', JSON.stringify(opts)); } catch (e) { /* ignore */ }
+  }
+
+  function currentLength() {
+    return PhotoDraw.LENGTHS.filter(function (l) { return l.id === opts.length; })[0];
+  }
+
+  function chip(group, value, label, sub, checked) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'chip';
+    b.setAttribute('role', 'radio');
+    b.setAttribute('aria-checked', checked ? 'true' : 'false');
+    b.dataset.group = group;
+    b.dataset.value = value;
+    b.disabled = recording;
+    b.textContent = label;
+    if (sub) {
+      var i = document.createElement('small');
+      i.className = 'num';
+      i.textContent = sub;
+      b.appendChild(i);
+    }
+    return b;
+  }
+
+  function renderOptions() {
+    el.styleChips.textContent = '';
+    PhotoDraw.STYLE_ORDER.forEach(function (id) {
+      el.styleChips.appendChild(chip('style', id, PhotoDraw.STYLES[id].name, '', id === opts.style));
+    });
+    el.lenChips.textContent = '';
+    PhotoDraw.LENGTHS.forEach(function (l) {
+      var sub = complexity ? clock(PhotoDraw.durationFor(complexity.score, l.mult)) : '';
+      el.lenChips.appendChild(chip('length', l.id, l.name, sub, l.id === opts.length));
+    });
+  }
+
+  function onChoose(e) {
+    var b = e.target.closest('.chip');
+    if (!b || recording || b.getAttribute('aria-checked') === 'true') return;
+    opts[b.dataset.group] = b.dataset.value;
+    saveOpts();
+    renderOptions();
+    if (work) paint();
+  }
+
+  // The option pickers live on the start screen, or under the player once a photo is loaded.
+  function dock() {
+    if (el.studio.hidden) el.start.insertBefore(el.options, el.startNote);
+    else el.studio.insertBefore(el.options, el.meta);
+  }
 
   /* ---------- loading ---------- */
 
@@ -91,6 +158,7 @@
 
   /* ---------- painting ---------- */
 
+  // Prepares a photo (resized working copy, thumbnail, complexity score) and paints it.
   async function begin(source, objectUrl) {
     var mine = ++job;
     stopPlayer();
@@ -102,7 +170,7 @@
     var k = side / Math.max(sw, sh);
     var W = Math.max(16, Math.round(sw * k)), H = Math.max(16, Math.round(sh * k));
 
-    var work = document.createElement('canvas');
+    work = document.createElement('canvas');
     work.width = W; work.height = H;
     var wctx = work.getContext('2d', { willReadFrequently: true });
     wctx.imageSmoothingQuality = 'high';
@@ -114,24 +182,40 @@
     el.start.hidden = true;
     el.studio.hidden = false;
     el.newPhoto.hidden = false;
+    dock();
     el.canvas.width = W; el.canvas.height = H;
-    var cx = el.canvas.getContext('2d');
-    cx.drawImage(work, 0, 0);
+    el.canvas.getContext('2d').drawImage(work, 0, 0);
     setBusy(true, 'Studying the photo…', 0);
     setControls(false);
     el.note.textContent = '';
     el.statComplexity.textContent = el.statStrokes.textContent = el.statLength.textContent = '–';
 
     await new Promise(function (r) { setTimeout(r, 30); });
-
-    var complexity = PhotoDraw.analyzeComplexity(work);
-    var duration = PhotoDraw.durationFor(complexity.score);
-    var plan = await PhotoDraw.planPainting(wctx.getImageData(0, 0, W, H), duration, function (f, label) {
-      if (mine === job) setBusy(true, f < 1 ? 'Planning: ' + label.toLowerCase() + '…' : 'Ready', f);
-    });
     if (mine !== job) return;
-
+    complexity = PhotoDraw.analyzeComplexity(work);
     el.statComplexity.textContent = Math.round(complexity.score * 100) + ' / 100';
+    renderOptions();
+    paint();
+  }
+
+  // (Re)paints the current photo with the chosen medium and length.
+  async function paint() {
+    if (!work) return;
+    var mine = ++job;
+    stopPlayer();
+    var len = currentLength(), duration = PhotoDraw.durationFor(complexity.score, len.mult);
+    var W = work.width, H = work.height;
+    el.canvas.getContext('2d').drawImage(work, 0, 0);
+    setBusy(true, 'Planning…', 0);
+    setControls(false);
+    el.note.textContent = '';
+    el.statStrokes.textContent = el.statLength.textContent = '–';
+
+    var plan = await PhotoDraw.planPainting(work.getContext('2d').getImageData(0, 0, W, H), duration, function (f, label) {
+      if (mine === job) setBusy(true, f < 1 ? 'Planning: ' + label.toLowerCase() + '…' : 'Ready', f);
+    }, { style: opts.style, detail: len.mult, cancelled: function () { return mine !== job; } });
+    if (!plan || mine !== job) return;
+
     el.statStrokes.textContent = plan.strokes.length.toLocaleString();
     el.statLength.textContent = clock(duration);
 
@@ -227,18 +311,20 @@
     }
     recording = true;
     setControls(false);
+    renderOptions();
     el.note.textContent = 'Recording the painting in real time — keep this tab visible. The video downloads when it finishes.';
 
     rec.ondataavailable = function (e) { if (e.data && e.data.size) chunks.push(e.data); };
     rec.onstop = function () {
       stream.getTracks().forEach(function (t) { t.stop(); });
       recording = false;
+      renderOptions();
       if (player !== p) return; // a new photo was loaded meanwhile
       p.onEnd = function () { syncPlayButton(); };
       setControls(true);
       syncPlayButton();
       if (chunks.length) {
-        download(new Blob(chunks, { type: fmt.mime.split(';')[0] }), baseName + '.' + fmt.ext);
+        download(new Blob(chunks, { type: fmt.mime.split(';')[0] }), baseName + '-' + opts.style + '.' + fmt.ext);
         el.note.textContent = 'Video saved.';
       } else {
         el.note.textContent = 'The recording came back empty. Please try again.';
@@ -267,7 +353,7 @@
     player.finish();
     syncPlayButton();
     el.canvas.toBlob(function (blob) {
-      if (blob) download(blob, baseName + '.png');
+      if (blob) download(blob, baseName + '-' + opts.style + '.png');
     }, 'image/png');
   }
 
@@ -309,6 +395,9 @@
     el.studio.hidden = true;
     el.newPhoto.hidden = true;
     el.start.hidden = false;
+    work = null; complexity = null;
+    dock();
+    renderOptions();
   });
 
   el.play.addEventListener('click', function () {
@@ -325,6 +414,7 @@
     syncPlayButton();
   });
 
+  el.options.addEventListener('click', onChoose);
   el.saveVideo.addEventListener('click', saveVideo);
   el.saveImage.addEventListener('click', saveImage);
 
@@ -334,4 +424,6 @@
       el.play.click();
     }
   });
+  dock();
+  renderOptions();
 })();

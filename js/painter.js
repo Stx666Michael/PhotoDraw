@@ -2,23 +2,64 @@
  * PhotoDraw painting engine.
  *
  * Turns a photo into an ordered list of brush strokes (coarse to fine), and
- * renders those strokes with a bristle brush. Planning is error-driven: each
+ * renders those strokes in one of several media. Planning is error-driven: each
  * layer only paints where the canvas still differs from the photo, so simple
  * photos need few strokes and busy photos need many.
  */
 (function (global) {
   'use strict';
 
-  var LAYERS = [
+  /* ---------- media ---------- */
+
+  // kind: how a stroke is drawn.
+  //   bristle - opaque bundle of bristle lines (oil)
+  //   wash    - a few translucent, overlapping ribbons (watercolor)
+  //   hatch   - a bundle of thin, evenly spaced lines (pencils, charcoal, ink)
+  var STYLES = {
+    oil:        { name: 'Oil paint',      kind: 'bristle', ground: [232, 223, 204], tex: 'weave', sat: 1.14, fillAll: true },
+    watercolor: { name: 'Watercolor',     kind: 'wash',    ground: [251, 248, 241], tex: 'paper', sat: 1.2, fillAll: true, alpha: [0.10, 0.42], pool: 0.84 },
+    colorpencil:{ name: 'Colored pencil', kind: 'hatch',   ground: [248, 244, 235], tex: 'tooth', sat: 1.1, t0: 14, lw: 1.3, alpha: 0.5, spacing: 3.6, shade: 18, smooth: true, gridMul: 1.1 },
+    graphite:   { name: 'Graphite',       kind: 'hatch',   ground: [246, 243, 236], tex: 'tooth', mono: true, t0: 12, lw: 1.1, alpha: 0.42, spacing: 3.8, shade: 22, smooth: true, gridMul: 1.1 },
+    charcoal:   { name: 'Charcoal',       kind: 'hatch',   ground: [240, 236, 228], tex: 'grain', mono: true, t0: 10, lw: 3.4, alpha: 0.26, spacing: 4.6, shade: 30, smooth: true, gridMul: 1.1 },
+    ink:        { name: 'Pen & ink',      kind: 'hatch',   ground: [251, 249, 243], tex: 'tooth', mono: true, fixed: [22, 28, 50], t0: 22, lw: 1.0, alpha: 0.85, spacing: 4.6, shade: 0, smooth: true, gridMul: 1.2 }
+  };
+  var STYLE_ORDER = ['oil', 'watercolor', 'colorpencil', 'graphite', 'charcoal', 'ink'];
+
+  // Longer animations use more, smaller strokes, so they show finer detail.
+  var LENGTHS = [
+    { id: 'short',    name: 'Short',    mult: 0.5 },
+    { id: 'standard', name: 'Standard', mult: 1 },
+    { id: 'long',     name: 'Long',     mult: 2 },
+    { id: 'epic',     name: 'Epic',     mult: 3.5 }
+  ];
+
+  var BASE_LAYERS = [
     { name: 'Blocking in',    size: 0.110, thresh: 0,  minSteps: 2, maxSteps: 6, cap: Infinity },
     { name: 'Building forms', size: 0.050, thresh: 15, minSteps: 2, maxSteps: 8, cap: Infinity },
     { name: 'Shaping',        size: 0.024, thresh: 17, minSteps: 2, maxSteps: 8, cap: 6000 },
     { name: 'Refining',       size: 0.012, thresh: 19, minSteps: 2, maxSteps: 7, cap: 10000 },
     { name: 'Fine details',   size: 0.006, thresh: 21, minSteps: 1, maxSteps: 5, cap: 14000 }
   ];
+  var EXTRA_LAYERS = [
+    { min: 1.5, name: 'Micro detail',      size: 0.0035, thresh: 16, minSteps: 1, maxSteps: 4, cap: 18000 },
+    { min: 3,   name: 'Finishing touches', size: 0.0028, thresh: 13, minSteps: 1, maxSteps: 4, cap: 24000 }
+  ];
 
-  var GROUND = [232, 223, 204]; // primed linen
-  var LIGHT = [-0.6, -0.8];     // light direction for the impasto shading
+  function layersFor(detail) {
+    var sk = Math.pow(detail, -0.25), tk = Math.pow(detail, -0.35);
+    var out = BASE_LAYERS.map(function (l, i) {
+      return {
+        name: l.name, minSteps: l.minSteps, maxSteps: l.maxSteps,
+        size: i ? l.size * sk : l.size,
+        thresh: i ? l.thresh * tk : 0,
+        cap: l.cap * detail
+      };
+    });
+    EXTRA_LAYERS.forEach(function (l) { if (detail >= l.min) out.push(l); });
+    return out;
+  }
+
+  var LIGHT = [-0.6, -0.8]; // light direction for the impasto shading
 
   function mulberry32(a) {
     return function () {
@@ -32,6 +73,9 @@
   function nextFrame() {
     return new Promise(function (resolve) { setTimeout(resolve, 0); });
   }
+
+  function clamp255(v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
+  function clampInt(v, n) { v = v | 0; return v < 0 ? 0 : v >= n ? n - 1 : v; }
 
   /* ---------- image helpers ---------- */
 
@@ -110,64 +154,93 @@
     return { score: score, edgeDensity: edgeDensity, meanGradient: meanGrad, colorEntropy: entropy };
   }
 
-  /** Animation length in seconds for a complexity score. */
-  function durationFor(score) {
-    return Math.round(8 + 34 * score);
+  /** Animation length in seconds for a complexity score and a length multiplier. */
+  function durationFor(score, mult) {
+    return Math.max(5, Math.round((8 + 34 * score) * (mult || 1)));
   }
 
-  /* ---------- brush ---------- */
+  /* ---------- stroke rendering ---------- */
 
-  /**
-   * Draws the part of a stroke between path positions u0 and u1 (in point
-   * units, 0 .. n-1). A stroke is a bundle of opaque bristle lines; drawing it
-   * in several partial calls gives the same result as drawing it at once.
-   */
-  function drawStroke(ctx, s, u0, u1) {
-    var pts = s.pts, nrm = s.nrm, last = s.n - 1;
-    var rnd = mulberry32(s.seed);
-    var nb = s.nb, w = s.w, j, f, off, lw, shade, bs, be, a, b, i, t, edge;
-    ctx.lineCap = 'round';
+  // Adds the part of a stroke's path between positions a and b (in point
+  // units, 0 .. n-1), shifted sideways by off, to the current path.
+  function pathTo(ctx, s, a, b, off) {
+    var i;
+    ctx.beginPath();
+    edge(ctx, s, a, off, true);
+    for (i = Math.floor(a) + 1; i < b; i++) {
+      ctx.lineTo(s.pts[2 * i] + off * s.nrm[2 * i], s.pts[2 * i + 1] + off * s.nrm[2 * i + 1]);
+    }
+    edge(ctx, s, b, off, false);
+  }
+
+  function edge(ctx, s, u, off, first) {
+    var p = s.pts, q = s.nrm, i = Math.min(s.n - 2, Math.floor(u)), t = u - i;
+    var x = p[2 * i] + (p[2 * i + 2] - p[2 * i]) * t + off * (q[2 * i] + (q[2 * i + 2] - q[2 * i]) * t);
+    var y = p[2 * i + 1] + (p[2 * i + 3] - p[2 * i + 1]) * t + off * (q[2 * i + 1] + (q[2 * i + 3] - q[2 * i + 1]) * t);
+    if (first) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+
+  function rgb(r, g, b) {
+    return 'rgb(' + Math.round(clamp255(r)) + ',' + Math.round(clamp255(g)) + ',' + Math.round(clamp255(b)) + ')';
+  }
+
+  // A bundle of bristle/pencil lines. Drawing a stroke in several partial
+  // calls gives the same result as drawing it at once.
+  function drawBundle(ctx, s, u0, u1) {
+    var rnd = mulberry32(s.seed), last = s.n - 1;
+    var nb = s.nb, w = s.w, j, f, off, lw, shade, bs, be, a, b, e;
+    ctx.lineCap = s.alpha < 1 ? 'butt' : 'round';
     ctx.lineJoin = 'round';
+    ctx.globalAlpha = s.alpha;
 
     for (j = 0; j < nb; j++) {
       f = nb === 1 ? 0 : (j / (nb - 1)) * 2 - 1;
       off = f * w * 0.43 + (rnd() - 0.5) * (w / nb) * 0.6;
-      lw = (w / nb) * (1.3 + rnd() * 0.7);
-      shade = (rnd() - 0.5) * 13 + f * s.lit * 8;
-      // Outer bristles start late and run dry early, which rounds the ends.
-      edge = 0.35 + Math.abs(f);
-      bs = rnd() * rnd() * Math.min(1.2, last * 0.3) * edge;
-      be = last - rnd() * rnd() * Math.min(1.5, last * 0.35) * edge;
+      lw = s.lw0 + rnd() * (s.lw1 - s.lw0);
+      shade = (rnd() - 0.5) * s.shade + f * s.lit * 8;
+      // Outer lines start late and run dry early, which rounds the ends.
+      e = 0.35 + Math.abs(f);
+      bs = rnd() * rnd() * Math.min(1.2, last * 0.3) * e;
+      be = last - rnd() * rnd() * Math.min(1.5, last * 0.35) * e;
       a = u0 > bs ? u0 : bs;
       b = u1 < be ? u1 : be;
       if (b <= a) continue;
-
-      ctx.beginPath();
-      i = Math.min(last - 1, Math.floor(a)); t = a - i;
-      ctx.moveTo(
-        pts[2 * i] + (pts[2 * i + 2] - pts[2 * i]) * t + off * (nrm[2 * i] + (nrm[2 * i + 2] - nrm[2 * i]) * t),
-        pts[2 * i + 1] + (pts[2 * i + 3] - pts[2 * i + 1]) * t + off * (nrm[2 * i + 1] + (nrm[2 * i + 3] - nrm[2 * i + 1]) * t)
-      );
-      for (i = Math.floor(a) + 1; i < b; i++) {
-        ctx.lineTo(pts[2 * i] + off * nrm[2 * i], pts[2 * i + 1] + off * nrm[2 * i + 1]);
-      }
-      i = Math.min(last - 1, Math.floor(b)); t = b - i;
-      ctx.lineTo(
-        pts[2 * i] + (pts[2 * i + 2] - pts[2 * i]) * t + off * (nrm[2 * i] + (nrm[2 * i + 2] - nrm[2 * i]) * t),
-        pts[2 * i + 1] + (pts[2 * i + 3] - pts[2 * i + 1]) * t + off * (nrm[2 * i + 1] + (nrm[2 * i + 3] - nrm[2 * i + 1]) * t)
-      );
+      pathTo(ctx, s, a, b, off);
       ctx.lineWidth = lw;
-      ctx.strokeStyle = 'rgb(' +
-        Math.max(0, Math.min(255, Math.round(s.r + shade))) + ',' +
-        Math.max(0, Math.min(255, Math.round(s.g + shade))) + ',' +
-        Math.max(0, Math.min(255, Math.round(s.b + shade))) + ')';
+      ctx.strokeStyle = rgb(s.r + shade, s.g + shade, s.b + shade);
       ctx.stroke();
     }
+    ctx.globalAlpha = 1;
   }
 
-  function makeStroke(xs, ys, w, r, g, b, seed, layer) {
+  // A watercolor stroke: a darker, wide pool of pigment with narrower, lighter
+  // glazes on top. The overlap is what gives washes their depth.
+  function drawWash(ctx, s, u0, u1) {
+    var rnd = mulberry32(s.seed), k, wd, off, m, st = { pool: s.pool };
+    ctx.lineCap = 'butt';
+    ctx.lineJoin = 'round';
+    for (k = 0; k < 3; k++) {
+      off = (rnd() - 0.5) * s.w * 0.2;
+      wd = s.w * (1 - 0.27 * k) * (0.9 + rnd() * 0.2);
+      m = k === 0 ? (st.pool || 0.9) : k === 2 ? 1.05 : 1;
+      ctx.globalAlpha = s.alpha * (k === 0 ? 0.8 : 1);
+      ctx.lineWidth = wd;
+      ctx.strokeStyle = rgb(s.r * m, s.g * m, s.b * m);
+      pathTo(ctx, s, u0, u1, off);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawStroke(ctx, s, u0, u1) {
+    if (u1 <= u0) return;
+    if (s.kind === 'wash') drawWash(ctx, s, u0, u1);
+    else drawBundle(ctx, s, u0, u1);
+  }
+
+  function makeStroke(xs, ys, w, r, g, b, seed, layer, nLayers, st, L) {
     var n = xs.length, pts = new Float32Array(2 * n), nrm = new Float32Array(2 * n);
-    var i, a, c, dx, dy, len, total = 0;
+    var i, a, c, dx, dy, len, total = 0, px = Math.min(1, L / 1024);
     for (i = 0; i < n; i++) { pts[2 * i] = xs[i]; pts[2 * i + 1] = ys[i]; }
     for (i = 0; i < n; i++) {
       a = i > 0 ? i - 1 : 0; c = i < n - 1 ? i + 1 : n - 1;
@@ -178,44 +251,70 @@
     }
     dx = xs[n - 1] - xs[0]; dy = ys[n - 1] - ys[0];
     len = Math.sqrt(dx * dx + dy * dy) || 1;
-    return {
-      pts: pts, nrm: nrm, n: n, w: w, r: r, g: g, b: b, seed: seed, layer: layer,
-      nb: Math.max(3, Math.min(16, Math.round(Math.sqrt(w) * 1.5))),
-      lit: (-dy / len) * LIGHT[0] + (dx / len) * LIGHT[1],
-      len: total, t0: 0, t1: 0
+
+    var s = {
+      pts: pts, nrm: nrm, n: n, w: w, r: r, g: g, b: b, seed: seed, layer: layer, kind: st.kind,
+      lit: 0, alpha: 1, nb: 1, lw0: 1, lw1: 1, shade: 0, len: total, t0: 0, t1: 0
     };
+    if (st.kind === 'bristle') {
+      s.nb = Math.max(3, Math.min(16, Math.round(Math.sqrt(w) * 1.5)));
+      s.lw0 = (w / s.nb) * 1.3; s.lw1 = (w / s.nb) * 2.0;
+      s.shade = 13;
+      s.lit = (-dy / len) * LIGHT[0] + (dx / len) * LIGHT[1];
+    } else if (st.kind === 'hatch') {
+      var sp = Math.max(st.spacing * px, w / 28);
+      s.nb = Math.max(2, Math.round(w * 0.9 / sp));
+      s.lw0 = st.lw * px * 0.8; s.lw1 = st.lw * px * 1.25;
+      s.alpha = st.alpha;
+      s.shade = st.shade;
+    } else {
+      s.alpha = st.alpha[0] + (st.alpha[1] - st.alpha[0]) * (layer / Math.max(1, nLayers - 1));
+      s.pool = st.pool;
+    }
+    return s;
+  }
+
+  function fillGround(ctx, W, H, st) {
+    ctx.fillStyle = rgb(st.ground[0], st.ground[1], st.ground[2]);
+    ctx.fillRect(0, 0, W, H);
   }
 
   /* ---------- planning ---------- */
 
-  function fillGround(ctx, W, H) {
-    ctx.fillStyle = 'rgb(' + GROUND.join(',') + ')';
-    ctx.fillRect(0, 0, W, H);
-  }
-
   /**
    * Plans the whole painting for a reference image (ImageData).
-   * Returns { width, height, strokes, layers, duration }.
+   * opts: { style, detail, cancelled }.
+   * Returns { width, height, strokes, layers, duration, style } or null if cancelled.
    */
-  async function planPainting(ref, duration, onProgress) {
+  async function planPainting(ref, duration, onProgress, opts) {
+    opts = opts || {};
+    var st = STYLES[opts.style] || STYLES.oil;
+    var detail = opts.detail || 1;
+    var cancelled = opts.cancelled || function () { return false; };
+    var LAYERS = layersFor(detail);
+
     var W = ref.width, H = ref.height, N = W * H, L = Math.max(W, H);
     var src = ref.data, i, p;
     var rnd = mulberry32(0x9E3779B1);
 
     // Reference colour planes, with a mild saturation and contrast lift so the
-    // result reads as paint rather than as a filtered photo.
-    var R = new Float32Array(N), G = new Float32Array(N), B = new Float32Array(N), l;
+    // result reads as a painting rather than as a filtered photo.
+    var R = new Float32Array(N), G = new Float32Array(N), B = new Float32Array(N), l, v, sat = st.sat || 1;
     for (i = 0, p = 0; i < N; i++, p += 4) {
       l = 0.299 * src[p] + 0.587 * src[p + 1] + 0.114 * src[p + 2];
-      R[i] = clamp255((l + (src[p] - l) * 1.14 - 128) * 1.05 + 128);
-      G[i] = clamp255((l + (src[p + 1] - l) * 1.14 - 128) * 1.05 + 128);
-      B[i] = clamp255((l + (src[p + 2] - l) * 1.14 - 128) * 1.05 + 128);
+      if (st.mono) {
+        R[i] = G[i] = B[i] = clamp255((l - 128) * 1.08 + 128);
+      } else {
+        R[i] = clamp255((l + (src[p] - l) * sat - 128) * 1.05 + 128);
+        G[i] = clamp255((l + (src[p + 1] - l) * sat - 128) * 1.05 + 128);
+        B[i] = clamp255((l + (src[p + 2] - l) * sat - 128) * 1.05 + 128);
+      }
     }
 
     var canvas = document.createElement('canvas');
     canvas.width = W; canvas.height = H;
     var ctx = canvas.getContext('2d', { willReadFrequently: true });
-    fillGround(ctx, W, H);
+    fillGround(ctx, W, H, st);
 
     var strokes = [], layerInfo = [];
 
@@ -223,10 +322,11 @@
       var layer = LAYERS[li];
       if (onProgress) onProgress(li / LAYERS.length, layer.name);
       await nextFrame();
+      if (cancelled()) return null;
 
       var w = Math.max(3, L * layer.size);
       var step = Math.max(2, w * 0.5);
-      var grid = Math.max(2, Math.round(w * 0.5));
+      var grid = Math.max(2, Math.round(w * (st.gridMul || 0.5)));
       var br = blur(R, W, H, w * 0.25), bg = blur(G, W, H, w * 0.25), bb = blur(B, W, H, w * 0.25);
 
       // Smoothed structure tensor: strokes follow edges instead of crossing them.
@@ -244,10 +344,21 @@
       var tr = Math.max(2, w * 0.5);
       jxx = blur(jxx, W, H, tr); jxy = blur(jxy, W, H, tr); jyy = blur(jyy, W, H, tr);
       await nextFrame();
+      if (cancelled()) return null;
 
-      var cv = ctx.getImageData(0, 0, W, H).data;
+      // The canvas as it is now. Thin-line media are compared blurred, because
+      // what the eye sees there is the average tone, not single pixels.
+      var cd = ctx.getImageData(0, 0, W, H).data;
+      var kr = new Float32Array(N), kg = new Float32Array(N), kb = new Float32Array(N);
+      for (i = 0, p = 0; i < N; i++, p += 4) { kr[i] = cd[p]; kg[i] = cd[p + 1]; kb[i] = cd[p + 2]; }
+      if (st.smooth) {
+        var kbr = Math.max(2, w * 0.3);
+        kr = blur(kr, W, H, kbr); kg = blur(kg, W, H, kbr); kb = blur(kb, W, H, kbr);
+      }
 
       // Find the cells that still need paint, and the worst pixel in each.
+      var fill = li === 0 && st.fillAll;
+      var thr = li === 0 ? (st.fillAll ? -1 : st.t0) : layer.thresh;
       var cells = [], sub = Math.max(1, grid >> 3), cx, cy, x1, y1, sum, cnt, best, bx, by, e;
       for (cy = 0; cy < H; cy += grid) {
         for (cx = 0; cx < W; cx += grid) {
@@ -255,16 +366,16 @@
           sum = 0; cnt = 0; best = -1; bx = cx; by = cy;
           for (y = cy; y < y1; y += sub) {
             for (x = cx; x < x1; x += sub) {
-              i = y * W + x; p = i * 4;
-              e = (Math.abs(br[i] - cv[p]) + Math.abs(bg[i] - cv[p + 1]) + Math.abs(bb[i] - cv[p + 2])) / 3;
+              i = y * W + x;
+              e = (Math.abs(br[i] - kr[i]) + Math.abs(bg[i] - kg[i]) + Math.abs(bb[i] - kb[i])) / 3;
               sum += e; cnt++;
               if (e > best) { best = e; bx = x; by = y; }
             }
           }
           e = sum / cnt;
-          if (li === 0) {
+          if (fill) {
             cells.push({ x: cx + grid * (0.3 + rnd() * 0.4), y: cy + grid * (0.3 + rnd() * 0.4), e: e });
-          } else if (e > layer.thresh) {
+          } else if (e > thr) {
             cells.push({ x: bx, y: by, e: e });
           }
         }
@@ -278,7 +389,7 @@
       for (var ci = 0; ci < cells.length; ci++) {
         layerStrokes.push(trace(cells[ci].x, cells[ci].y));
       }
-      // Loosely dark-to-light, the way a painter builds a layer.
+      // Loosely dark-to-light, the way an artist builds a layer.
       layerStrokes.forEach(function (s) { s.key = rnd() + 0.6 * (0.299 * s.r + 0.587 * s.g + 0.114 * s.b) / 255; });
       layerStrokes.sort(function (a, b) { return a.key - b.key; });
 
@@ -291,30 +402,34 @@
 
     assignTimes(strokes, layerInfo, duration);
     if (onProgress) onProgress(1, 'Ready');
-    return { width: W, height: H, strokes: strokes, layers: layerInfo, duration: duration };
+    return { width: W, height: H, strokes: strokes, layers: layerInfo, duration: duration, style: opts.style || 'oil' };
 
     function trace(x0, y0) {
       var xi = clampInt(x0, W), yi = clampInt(y0, H), k = yi * W + xi;
-      var lj = (rnd() - 0.5) * 9;
-      var cr = br[k] + lj + (rnd() - 0.5) * 5;
-      var cg = bg[k] + lj + (rnd() - 0.5) * 5;
-      var cb = bb[k] + lj + (rnd() - 0.5) * 5;
+      var lj = (rnd() - 0.5) * 9, cr, cg, cb;
+      if (st.fixed) {
+        cr = st.fixed[0]; cg = st.fixed[1]; cb = st.fixed[2];
+      } else {
+        cr = br[k] + lj + (rnd() - 0.5) * 5;
+        cg = bg[k] + lj + (rnd() - 0.5) * 5;
+        cb = bb[k] + lj + (rnd() - 0.5) * 5;
+      }
       var xs = [x0], ys = [y0], px = x0, py = y0, ldx = 0, ldy = 0;
-      var a, b, mag, th, tx, ty, n, dc, ds, q, margin = w * 0.5;
+      var a, b, mag, th, tx, ty, n, dc, ds, margin = w * 0.5;
 
       for (var s = 1; s <= layer.maxSteps; s++) {
-        xi = clampInt(px, W); yi = clampInt(py, H); k = yi * W + xi; q = k * 4;
+        xi = clampInt(px, W); yi = clampInt(py, H); k = yi * W + xi;
         if (s > layer.minSteps) {
           // Stop once the canvas already matches the photo better than this colour would.
-          dc = Math.abs(br[k] - cv[q]) + Math.abs(bg[k] - cv[q + 1]) + Math.abs(bb[k] - cv[q + 2]);
+          dc = Math.abs(br[k] - kr[k]) + Math.abs(bg[k] - kg[k]) + Math.abs(bb[k] - kb[k]);
           ds = Math.abs(br[k] - cr) + Math.abs(bg[k] - cg) + Math.abs(bb[k] - cb);
           if (dc < ds) break;
         }
         a = jxx[k] - jyy[k]; b = 2 * jxy[k];
         mag = Math.sqrt(a * a + b * b);
         if (mag > 1.5) {
-          th = 0.5 * Math.atan2(b, a);       // dominant gradient direction
-          tx = -Math.sin(th); ty = Math.cos(th); // paint along the edge
+          th = 0.5 * Math.atan2(b, a);            // dominant gradient direction
+          tx = -Math.sin(th); ty = Math.cos(th);  // draw along the edge
         } else {
           // Flat area: a loose, slowly turning hatch.
           th = -0.7 + 0.8 * Math.sin(px / L * 5.1 + 1.3) * Math.cos(py / L * 4.3 + 0.7);
@@ -333,12 +448,9 @@
         ldx = tx; ldy = ty;
       }
       if (xs.length < 2) { xs.push(x0 + step * 0.6); ys.push(y0 - step * 0.3); }
-      return makeStroke(xs, ys, w, cr, cg, cb, (rnd() * 4294967296) >>> 0, li);
+      return makeStroke(xs, ys, w, cr, cg, cb, (rnd() * 4294967296) >>> 0, li, LAYERS.length, st, L);
     }
   }
-
-  function clamp255(v) { return v < 0 ? 0 : v > 255 ? 255 : v; }
-  function clampInt(v, n) { v = v | 0; return v < 0 ? 0 : v >= n ? n - 1 : v; }
 
   // Spread the strokes over the animation. Early layers have few strokes but
   // get a generous share of time so the block-in is watchable; within a layer
@@ -361,7 +473,7 @@
     });
   }
 
-  /* ---------- playback ---------- */
+  /* ---------- surface textures ---------- */
 
   function makeWeave(W, H) {
     var c = document.createElement('canvas');
@@ -379,15 +491,51 @@
     return c;
   }
 
+  // Paper surfaces: soft blotches (coarse) plus per-pixel grain (fine).
+  var PAPER = {
+    paper: { base: 249, fine: 5,  coarse: 7,  cs: 3 },
+    tooth: { base: 246, fine: 11, coarse: 5,  cs: 2 },
+    grain: { base: 238, fine: 28, coarse: 12, cs: 2 }
+  };
+
+  function makeTexture(kind, W, H) {
+    if (kind === 'weave') return makeWeave(W, H);
+    var P = PAPER[kind] || PAPER.paper, rnd = mulberry32(21), i, p, v;
+    var cw = Math.ceil(W / P.cs), ch = Math.ceil(H / P.cs);
+    var small = document.createElement('canvas');
+    small.width = cw; small.height = ch;
+    var sx = small.getContext('2d'), si = sx.createImageData(cw, ch), sd = si.data;
+    for (i = 0, p = 0; i < cw * ch; i++, p += 4) {
+      v = P.base + (rnd() - 0.5) * 2 * P.coarse;
+      sd[p] = sd[p + 1] = sd[p + 2] = v; sd[p + 3] = 255;
+    }
+    sx.putImageData(si, 0, 0);
+    var c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    var cx = c.getContext('2d', { willReadFrequently: true });
+    cx.imageSmoothingEnabled = true;
+    cx.drawImage(small, 0, 0, W, H);
+    var img = cx.getImageData(0, 0, W, H), d = img.data;
+    for (i = 0, p = 0; i < W * H; i++, p += 4) {
+      v = clamp255(d[p] + (rnd() - 0.5) * P.fine);
+      d[p] = d[p + 1] = d[p + 2] = v; d[p + 3] = 255;
+    }
+    cx.putImageData(img, 0, 0);
+    return c;
+  }
+
+  /* ---------- playback ---------- */
+
   /** Plays a plan onto a visible canvas in real time. */
   function Player(display, plan) {
     this.display = display;
     this.plan = plan;
+    this.style = STYLES[plan.style] || STYLES.oil;
     this.dctx = display.getContext('2d');
     this.paint = document.createElement('canvas');
     this.paint.width = plan.width; this.paint.height = plan.height;
     this.pctx = this.paint.getContext('2d');
-    this.weave = makeWeave(plan.width, plan.height);
+    this.texture = makeTexture(this.style.tex, plan.width, plan.height);
     this.onFrame = null;
     this.onEnd = null;
     this.playing = false;
@@ -401,7 +549,7 @@
     this.cur = 0;
     this.drawn = 0;
     this.ended = false;
-    fillGround(this.pctx, this.plan.width, this.plan.height);
+    fillGround(this.pctx, this.plan.width, this.plan.height, this.style);
     this.composite();
   };
 
@@ -410,7 +558,7 @@
     c.globalCompositeOperation = 'source-over';
     c.drawImage(this.paint, 0, 0);
     c.globalCompositeOperation = 'multiply';
-    c.drawImage(this.weave, 0, 0);
+    c.drawImage(this.texture, 0, 0);
     c.globalCompositeOperation = 'source-over';
   };
 
@@ -479,6 +627,9 @@
   };
 
   global.PhotoDraw = {
+    STYLES: STYLES,
+    STYLE_ORDER: STYLE_ORDER,
+    LENGTHS: LENGTHS,
     analyzeComplexity: analyzeComplexity,
     durationFor: durationFor,
     planPainting: planPainting,
